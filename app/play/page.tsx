@@ -604,6 +604,7 @@ export default function Page() {
   const wsRef = useRef<WebSocket | null>(null);
   const wsIntentionalCloseRef = useRef(false);
   const [pointerIndicator, setPointerIndicator] = useState({ x: 50, y: 50, angle: 0, visible: false });
+  const [joystickState, setJoystickState] = useState({ active: false, x: 0, y: 0 });
   const biteAudioRef = useRef<HTMLAudioElement | null>(null);
   const hitAudioRef = useRef<HTMLAudioElement | null>(null);
   const victoryAudioRef = useRef<HTMLAudioElement | null>(null);
@@ -904,6 +905,25 @@ export default function Page() {
     [roomId, playerId]
   );
 
+  const steerFromVector = useCallback(
+    (dx: number, dy: number) => {
+      if (playMode === "solo" && state?.solo) {
+        setState((prev) => {
+          if (!prev || !prev.solo) {
+            return prev;
+          }
+          return {
+            ...prev,
+            solo: { ...prev.solo, targetX: dx, targetY: dy }
+          };
+        });
+        return;
+      }
+      sendMultiplayerTarget(dx, dy);
+    },
+    [playMode, sendMultiplayerTarget, state?.solo]
+  );
+
   const steerFromPointer = useCallback(
     (clientX: number, clientY: number) => {
       if (!state || !boardRef.current) {
@@ -930,21 +950,9 @@ export default function Page() {
         angle: Math.atan2(dy, dx),
         visible: true
       });
-      if (playMode === "solo" && state.solo) {
-        setState((prev) => {
-          if (!prev || !prev.solo) {
-            return prev;
-          }
-          return {
-            ...prev,
-            solo: { ...prev.solo, targetX: dx, targetY: dy }
-          };
-        });
-        return;
-      }
-      sendMultiplayerTarget(dx, dy);
+      steerFromVector(dx, dy);
     },
-    [state, playMode, playerId, sendMultiplayerTarget]
+    [state, playMode, playerId, steerFromVector]
   );
 
   useEffect(() => {
@@ -1341,6 +1349,47 @@ export default function Page() {
                   transform: `translate(-50%, -50%) rotate(${pointerIndicator.angle}rad)`
                 }}
               />
+              <div
+                className={`mobile-joystick ${joystickState.active ? "active" : ""}`}
+                onTouchStart={(event) => {
+                  const touch = event.touches[0];
+                  const rect = event.currentTarget.getBoundingClientRect();
+                  const dx = touch.clientX - (rect.left + rect.width / 2);
+                  const dy = touch.clientY - (rect.top + rect.height / 2);
+                  const size = Math.hypot(dx, dy) || 1;
+                  const limited = Math.min(32, size);
+                  setJoystickState({
+                    active: true,
+                    x: (dx / size) * limited,
+                    y: (dy / size) * limited
+                  });
+                  steerFromVector(dx, dy);
+                }}
+                onTouchMove={(event) => {
+                  event.preventDefault();
+                  const touch = event.touches[0];
+                  const rect = event.currentTarget.getBoundingClientRect();
+                  const dx = touch.clientX - (rect.left + rect.width / 2);
+                  const dy = touch.clientY - (rect.top + rect.height / 2);
+                  const size = Math.hypot(dx, dy) || 1;
+                  const limited = Math.min(32, size);
+                  setJoystickState({
+                    active: true,
+                    x: (dx / size) * limited,
+                    y: (dy / size) * limited
+                  });
+                  steerFromVector(dx, dy);
+                }}
+                onTouchEnd={() => {
+                  setJoystickState({ active: false, x: 0, y: 0 });
+                }}
+              >
+                <div className="mobile-joystick-base" />
+                <div
+                  className="mobile-joystick-knob"
+                  style={{ transform: `translate(calc(-50% + ${joystickState.x}px), calc(-50% + ${joystickState.y}px))` }}
+                />
+              </div>
             </section>
           </section>
 

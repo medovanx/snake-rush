@@ -1,6 +1,5 @@
-const PLAYER_IDS = ["p1", "p2"] as const;
+export type PlayerId = string;
 
-type PlayerId = (typeof PLAYER_IDS)[number];
 type Point = { x: number; y: number };
 type Vector = { x: number; y: number };
 
@@ -54,6 +53,8 @@ type RoomState = {
   nextSpecialFoodAt: number;
   status: "waiting" | "running" | "gameOver";
   winner: PlayerId | null;
+  playerIds: PlayerId[];
+  activePlayerIds: PlayerId[];
   players: Players;
 };
 
@@ -65,6 +66,9 @@ type CreateRoomOptions = {
   selfCollisionAllowed?: boolean;
   snakeCollisionAllowed?: boolean;
   fireEnabled?: boolean;
+  playerCount?: number;
+  playerIds?: PlayerId[];
+  activePlayerIds?: PlayerId[];
 };
 
 export const MAX_FOODS = 4;
@@ -82,6 +86,7 @@ const SELF_COLLISION_RADIUS = 1.65;
 const SNAKE_COLLISION_RADIUS = 1.8;
 const FOOD_MARGIN = 6;
 const SPECIAL_FOOD_MARGIN = 12;
+const MAX_PLAYERS = 10;
 
 function normalizeVector(vector: Vector, fallback: Vector = { x: 1, y: 0 }): Vector {
   const magnitude = Math.hypot(vector.x, vector.y);
@@ -171,6 +176,11 @@ function clonePlayer(player: Player): Player {
   };
 }
 
+function generatePlayerIds(playerCount = 2): PlayerId[] {
+  const count = Math.max(2, Math.min(MAX_PLAYERS, Math.floor(Number(playerCount) || 2)));
+  return Array.from({ length: count }, (_, index) => `p${index + 1}`);
+}
+
 function createPlayer(id: PlayerId, head: Point, heading: Vector): Player {
   const normalizedHeading = normalizeVector(heading);
   const baseLength = 11;
@@ -189,29 +199,57 @@ function createPlayer(id: PlayerId, head: Point, heading: Vector): Player {
   };
 }
 
-function decideWinner(players: Players): PlayerId | null {
-  if (players.p1.score > players.p2.score) {
-    return "p1";
+function createPlayers(width: number, height: number, playerIds: PlayerId[]): Players {
+  if (playerIds.length === 2) {
+    return {
+      [playerIds[0]]: createPlayer(playerIds[0], { x: 24, y: height / 2 }, { x: 1, y: 0 }),
+      [playerIds[1]]: createPlayer(playerIds[1], { x: width - 24, y: height / 2 }, { x: -1, y: 0 })
+    };
   }
-  if (players.p2.score > players.p1.score) {
-    return "p2";
-  }
-  return null;
+  const center = { x: width / 2, y: height / 2 };
+  const radius = Math.min(width, height) * 0.32;
+  return Object.fromEntries(
+    playerIds.map((playerId, index) => {
+      const angle = (-Math.PI / 2) + (Math.PI * 2 * index) / playerIds.length;
+      const head = {
+        x: center.x + Math.cos(angle) * radius,
+        y: center.y + Math.sin(angle) * radius
+      };
+      const heading = normalizeVector({
+        x: center.x - head.x,
+        y: center.y - head.y
+      });
+      return [playerId, createPlayer(playerId, head, heading)];
+    })
+  );
 }
 
-function winnerFromLoser(loser: PlayerId | null): PlayerId | null {
-  if (loser === "p1") {
-    return "p2";
+function decideWinner(players: Players, candidateIds: PlayerId[]): PlayerId | null {
+  if (!candidateIds.length) {
+    return null;
   }
-  if (loser === "p2") {
-    return "p1";
+  let bestId: PlayerId | null = null;
+  let bestScore = Number.NEGATIVE_INFINITY;
+  let tied = false;
+  for (const playerId of candidateIds) {
+    const score = players[playerId]?.score ?? Number.NEGATIVE_INFINITY;
+    if (score > bestScore) {
+      bestScore = score;
+      bestId = playerId;
+      tied = false;
+      continue;
+    }
+    if (score === bestScore) {
+      tied = true;
+    }
   }
-  return null;
+  return tied ? null : bestId;
 }
 
 function isPointClear(
   point: Point,
   players: Players,
+  playerIds: PlayerId[],
   foods: Food[],
   minDistance: number,
   edgeMargin: number,
@@ -226,8 +264,9 @@ function isPointClear(
   ) {
     return false;
   }
-  for (const player of Object.values(players)) {
-    if (player.snake.some((segment) => distance(segment, point) < minDistance)) {
+  for (const playerId of playerIds) {
+    const player = players[playerId];
+    if (player?.snake.some((segment) => distance(segment, point) < minDistance)) {
       return false;
     }
   }
@@ -241,6 +280,7 @@ function randomOpenPoint(
   width: number,
   height: number,
   players: Players,
+  playerIds: PlayerId[],
   foods: Food[],
   rng: Rng,
   edgeMargin: number,
@@ -251,27 +291,52 @@ function randomOpenPoint(
       x: edgeMargin + rng() * Math.max(1, width - edgeMargin * 2),
       y: edgeMargin + rng() * Math.max(1, height - edgeMargin * 2)
     };
-    if (isPointClear(point, players, foods, minDistance, edgeMargin, width, height)) {
+    if (isPointClear(point, players, playerIds, foods, minDistance, edgeMargin, width, height)) {
       return point;
     }
   }
   return null;
 }
 
-export function placeFood(width: number, height: number, players: Players, foods: Food[] = [], rng: Rng = Math.random): Food | null {
-  const point = randomOpenPoint(width, height, players, foods, rng, FOOD_MARGIN, 6);
+function getActiveIds(state: RoomState): PlayerId[] {
+  return state.activePlayerIds.filter((playerId) => Boolean(state.players[playerId]));
+}
+
+export function placeFood(
+  width: number,
+  height: number,
+  players: Players,
+  foods: Food[] = [],
+  rng: Rng = Math.random,
+  playerIds: PlayerId[] = Object.keys(players)
+): Food | null {
+  const point = randomOpenPoint(width, height, players, playerIds, foods, rng, FOOD_MARGIN, 6);
   return point ? createFood(point, rng, "normal") : null;
 }
 
-function placeSpecialFood(width: number, height: number, players: Players, foods: Food[] = [], rng: Rng = Math.random): Food | null {
-  const point = randomOpenPoint(width, height, players, foods, rng, SPECIAL_FOOD_MARGIN, 10);
+function placeSpecialFood(
+  width: number,
+  height: number,
+  players: Players,
+  foods: Food[] = [],
+  rng: Rng = Math.random,
+  playerIds: PlayerId[] = Object.keys(players)
+): Food | null {
+  const point = randomOpenPoint(width, height, players, playerIds, foods, rng, SPECIAL_FOOD_MARGIN, 10);
   return point ? createFood(point, rng, "special") : null;
 }
 
-export function seedFoods(width: number, height: number, players: Players, maxFoods = MAX_FOODS, rng: Rng = Math.random): Food[] {
+export function seedFoods(
+  width: number,
+  height: number,
+  players: Players,
+  maxFoods = MAX_FOODS,
+  rng: Rng = Math.random,
+  playerIds: PlayerId[] = Object.keys(players)
+): Food[] {
   const foods: Food[] = [];
   while (foods.length < maxFoods) {
-    const nextFood = placeFood(width, height, players, foods, rng);
+    const nextFood = placeFood(width, height, players, foods, rng, playerIds);
     if (!nextFood) {
       break;
     }
@@ -287,15 +352,14 @@ export function createRoomState(
   rng: Rng = Math.random,
   options: CreateRoomOptions = {}
 ): RoomState {
+  const playerIds = Array.from(new Set(options.playerIds?.length ? options.playerIds : generatePlayerIds(options.playerCount)));
+  const activePlayerIds = playerIds.filter((playerId) => (options.activePlayerIds ?? playerIds).includes(playerId));
   const winCondition = options.winCondition === "score" ? "score" : "time";
   const scoreLimit =
     winCondition === "score"
       ? Math.max(1, Math.min(200, Math.floor(Number(options.scoreLimit) || 5)))
       : null;
-  const players: Players = {
-    p1: createPlayer("p1", { x: 24, y: height / 2 }, { x: 1, y: 0 }),
-    p2: createPlayer("p2", { x: width - 24, y: height / 2 }, { x: -1, y: 0 })
-  };
+  const players = createPlayers(width, height, playerIds);
 
   return {
     width,
@@ -307,13 +371,15 @@ export function createRoomState(
     selfCollisionAllowed: Boolean(options.selfCollisionAllowed),
     snakeCollisionAllowed: Boolean(options.snakeCollisionAllowed),
     fireEnabled: Boolean(options.fireEnabled),
-    foods: seedFoods(width, height, players, MAX_FOODS, rng),
+    foods: seedFoods(width, height, players, MAX_FOODS, rng, activePlayerIds),
     bullets: [],
     impacts: [],
     foodsCollected: 0,
     nextSpecialFoodAt: SPECIAL_FOOD_INTERVAL,
     status: "waiting",
     winner: null,
+    playerIds,
+    activePlayerIds,
     players
   };
 }
@@ -331,17 +397,19 @@ export function setDuration(state: RoomState, durationSeconds: number): RoomStat
 }
 
 export function setPlayerTarget(state: RoomState, playerId: string, x: number, y: number): RoomState {
-  if ((playerId !== "p1" && playerId !== "p2") || !Number.isFinite(x) || !Number.isFinite(y)) {
+  if (!state.activePlayerIds.includes(playerId) || !Number.isFinite(x) || !Number.isFinite(y)) {
     return state;
   }
-  const typedPlayerId = playerId as PlayerId;
-  const player = state.players[typedPlayerId];
+  const player = state.players[playerId];
+  if (!player) {
+    return state;
+  }
   const target = normalizeVector({ x, y }, player.heading);
   return {
     ...state,
     players: {
       ...state.players,
-      [typedPlayerId]: {
+      [playerId]: {
         ...player,
         target
       }
@@ -350,13 +418,12 @@ export function setPlayerTarget(state: RoomState, playerId: string, x: number, y
 }
 
 export function fireBullet(state: RoomState, playerId: string, nowMs = Date.now()): RoomState {
-  if ((playerId !== "p1" && playerId !== "p2") || !state.fireEnabled || state.status !== "running") {
+  if (!state.activePlayerIds.includes(playerId) || !state.fireEnabled || state.status !== "running") {
     return state;
   }
 
-  const typedPlayerId = playerId as PlayerId;
-  const player = state.players[typedPlayerId];
-  if (nowMs - player.lastShotAt < FIRE_COOLDOWN_MS) {
+  const player = state.players[playerId];
+  if (!player || nowMs - player.lastShotAt < FIRE_COOLDOWN_MS) {
     return state;
   }
 
@@ -369,18 +436,18 @@ export function fireBullet(state: RoomState, playerId: string, nowMs = Date.now(
     bullets: [
       ...state.bullets,
       {
-        id: `${typedPlayerId}-${nowMs}-${state.bullets.length}`,
+        id: `${playerId}-${nowMs}-${state.bullets.length}`,
         x: spawn.x,
         y: spawn.y,
         vx: heading.x * BULLET_SPEED,
         vy: heading.y * BULLET_SPEED,
-        ownerId: typedPlayerId,
+        ownerId: playerId,
         ttlMs: BULLET_TTL_MS
       }
     ],
     players: {
       ...state.players,
-      [typedPlayerId]: {
+      [playerId]: {
         ...player,
         lastShotAt: nowMs
       }
@@ -432,22 +499,26 @@ export function tickRoom(state: RoomState, tickMs = 80, rng: Rng = Math.random):
     return state;
   }
 
+  const activePlayerIds = getActiveIds(state);
+  if (!activePlayerIds.length) {
+    return state;
+  }
+
   let foods = state.foods
     .map((food) => ({
       ...food,
       ttlMs: food.kind === "special" ? Math.max(0, (food.ttlMs ?? SPECIAL_FOOD_LIFETIME_MS) - tickMs) : null
     }))
     .filter((food) => food.kind !== "special" || (food.ttlMs ?? 0) > 0);
-  const players: Players = {
-    p1: clonePlayer(state.players.p1),
-    p2: clonePlayer(state.players.p2)
-  };
+  const players: Players = Object.fromEntries(
+    state.playerIds.map((playerId) => [playerId, clonePlayer(state.players[playerId])])
+  );
   const impacts = state.impacts
     .map((impact) => ({ ...impact, ttlMs: impact.ttlMs - tickMs }))
     .filter((impact) => impact.ttlMs > 0);
   let foodsCollected = state.foodsCollected;
 
-  for (const playerId of PLAYER_IDS) {
+  for (const playerId of activePlayerIds) {
     const result = updatePlayer(players[playerId], foods, tickMs, state.width, state.height);
     players[playerId] = result.player;
     if (result.eatenIndex >= 0 && result.eatenFood) {
@@ -458,22 +529,29 @@ export function tickRoom(state: RoomState, tickMs = 80, rng: Rng = Math.random):
     }
   }
 
-  let selfCollisionFinished = false;
-  let selfCollisionLoser: PlayerId | null = null;
+  const collisionLosers = new Set<PlayerId>();
   if (state.selfCollisionAllowed) {
-    const p1SelfHit = bodyCollision(players.p1.snake[0], players.p1.snake, SELF_COLLISION_RADIUS, 8);
-    const p2SelfHit = bodyCollision(players.p2.snake[0], players.p2.snake, SELF_COLLISION_RADIUS, 8);
-    selfCollisionFinished = p1SelfHit || p2SelfHit;
-    selfCollisionLoser = p1SelfHit && p2SelfHit ? null : p1SelfHit ? "p1" : p2SelfHit ? "p2" : null;
+    for (const playerId of activePlayerIds) {
+      const player = players[playerId];
+      if (bodyCollision(player.snake[0], player.snake, SELF_COLLISION_RADIUS, 8)) {
+        collisionLosers.add(playerId);
+      }
+    }
   }
 
-  let snakeCollisionFinished = false;
-  let snakeCollisionLoser: PlayerId | null = null;
   if (state.snakeCollisionAllowed) {
-    const p1HitsP2 = bodyCollision(players.p1.snake[0], players.p2.snake, SNAKE_COLLISION_RADIUS, 0);
-    const p2HitsP1 = bodyCollision(players.p2.snake[0], players.p1.snake, SNAKE_COLLISION_RADIUS, 0);
-    snakeCollisionFinished = p1HitsP2 || p2HitsP1;
-    snakeCollisionLoser = p1HitsP2 && p2HitsP1 ? null : p1HitsP2 ? "p1" : p2HitsP1 ? "p2" : null;
+    for (const playerId of activePlayerIds) {
+      const player = players[playerId];
+      for (const otherPlayerId of activePlayerIds) {
+        if (otherPlayerId === playerId) {
+          continue;
+        }
+        if (bodyCollision(player.snake[0], players[otherPlayerId].snake, SNAKE_COLLISION_RADIUS, 0)) {
+          collisionLosers.add(playerId);
+          break;
+        }
+      }
+    }
   }
 
   const bullets: Bullet[] = [];
@@ -495,28 +573,37 @@ export function tickRoom(state: RoomState, tickMs = 80, rng: Rng = Math.random):
     if (nextBullet.ttlMs <= 0) {
       continue;
     }
-    const targetId: PlayerId = bullet.ownerId === "p1" ? "p2" : "p1";
-    const hitTarget = players[targetId].snake.some(
-      (segment, index) => index > 2 && distanceToSegment(segment, startPoint, nextPosition) < 1.65
-    );
-    if (hitTarget) {
+    let hit = false;
+    for (const targetId of activePlayerIds) {
+      if (targetId === bullet.ownerId) {
+        continue;
+      }
+      const hitTarget = players[targetId].snake.some(
+        (segment, index) => index > 2 && distanceToSegment(segment, startPoint, nextPosition) < 1.65
+      );
+      if (!hitTarget) {
+        continue;
+      }
       players[targetId].score = Math.max(0, players[targetId].score - 1);
       impacts.push({
-        id: `impact-${bullet.id}`,
+        id: `impact-${bullet.id}-${targetId}`,
         x: nextPosition.x,
         y: nextPosition.y,
         ownerId: bullet.ownerId,
         ttlMs: IMPACT_TTL_MS
       });
-      continue;
+      hit = true;
+      break;
     }
-    bullets.push(nextBullet);
+    if (!hit) {
+      bullets.push(nextBullet);
+    }
   }
 
   let nextSpecialFoodAt = state.nextSpecialFoodAt;
   const hasSpecialFood = foods.some((food) => food.kind === "special");
   if (foodsCollected >= nextSpecialFoodAt && !hasSpecialFood) {
-    const specialFood = placeSpecialFood(state.width, state.height, players, foods, rng);
+    const specialFood = placeSpecialFood(state.width, state.height, players, foods, rng, activePlayerIds);
     if (specialFood) {
       foods.push(specialFood);
       nextSpecialFoodAt += SPECIAL_FOOD_INTERVAL;
@@ -524,7 +611,7 @@ export function tickRoom(state: RoomState, tickMs = 80, rng: Rng = Math.random):
   }
 
   while (foods.length < MAX_FOODS) {
-    const nextFood = placeFood(state.width, state.height, players, foods, rng);
+    const nextFood = placeFood(state.width, state.height, players, foods, rng, activePlayerIds);
     if (!nextFood) {
       break;
     }
@@ -536,10 +623,9 @@ export function tickRoom(state: RoomState, tickMs = 80, rng: Rng = Math.random):
   const scoreFinished =
     state.winCondition === "score" &&
     state.scoreLimit !== null &&
-    (players.p1.score >= state.scoreLimit || players.p2.score >= state.scoreLimit);
-  const finished = timerFinished || scoreFinished || selfCollisionFinished || snakeCollisionFinished;
-  const collisionWinner =
-    winnerFromLoser(selfCollisionLoser) ?? winnerFromLoser(snakeCollisionLoser);
+    activePlayerIds.some((playerId) => players[playerId].score >= state.scoreLimit);
+  const finished = timerFinished || scoreFinished || collisionLosers.size > 0;
+  const survivingIds = activePlayerIds.filter((playerId) => !collisionLosers.has(playerId));
 
   return {
     ...state,
@@ -551,20 +637,26 @@ export function tickRoom(state: RoomState, tickMs = 80, rng: Rng = Math.random):
     nextSpecialFoodAt,
     players,
     status: finished ? "gameOver" : "running",
-    winner: finished ? collisionWinner ?? decideWinner(players) : null
+    winner: finished ? decideWinner(players, survivingIds.length ? survivingIds : activePlayerIds) : null
   };
 }
 
-export function restartRoom(state: RoomState, rng: Rng = Math.random): RoomState {
+export function restartRoom(
+  state: RoomState,
+  rng: Rng = Math.random,
+  options: { activePlayerIds?: PlayerId[] } = {}
+): RoomState {
   const fresh = createRoomState(state.width, state.height, state.durationSeconds, rng, {
     winCondition: state.winCondition,
     scoreLimit: state.scoreLimit,
     selfCollisionAllowed: state.selfCollisionAllowed,
     snakeCollisionAllowed: state.snakeCollisionAllowed,
-    fireEnabled: state.fireEnabled
+    fireEnabled: state.fireEnabled,
+    playerIds: state.playerIds,
+    activePlayerIds: options.activePlayerIds ?? state.activePlayerIds
   });
   return {
     ...fresh,
-    status: state.status === "running" || state.status === "gameOver" ? "running" : "waiting"
+    status: "waiting"
   };
 }

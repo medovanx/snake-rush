@@ -25,6 +25,8 @@ export async function POST(request: NextRequest) {
   const body = await request.json().catch(() => ({}));
   const baseUrl = getBaseUrl(request);
   const room = createRoom(baseUrl, {
+    mode: body.mode,
+    maxPlayers: body.maxPlayers,
     winCondition: body.winCondition,
     durationSeconds: body.durationSeconds,
     scoreLimit: body.scoreLimit,

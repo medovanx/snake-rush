@@ -34,7 +34,7 @@ async function main() {
       const roomId = safeRoomId(url.searchParams.get("roomId"));
       const playerId = url.searchParams.get("playerId");
       const room = getRoom(roomId);
-      if (!room || (playerId !== "p1" && playerId !== "p2") || !room.seats[playerId]) {
+      if (!room || !playerId || !room.playerIds.includes(playerId) || !room.seats[playerId]) {
         ws.close();
         return;
       }

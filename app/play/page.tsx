@@ -19,7 +19,7 @@ type Bullet = {
   y: number;
   vx: number;
   vy: number;
-  ownerId: "p1" | "p2";
+  ownerId: string;
   ttlMs: number;
 };
 
@@ -27,8 +27,21 @@ type Impact = {
   id: string;
   x: number;
   y: number;
-  ownerId: "p1" | "p2";
+  ownerId: string;
   ttlMs: number;
+};
+
+type PlayerProfile = {
+  name: string;
+  color: string;
+};
+
+type LobbySlot = {
+  playerId: string;
+  joined: boolean;
+  ready: boolean;
+  name: string;
+  color: string;
 };
 
 type PlayerState = {
@@ -55,8 +68,10 @@ type GameState = {
   foodsCollected: number;
   nextSpecialFoodAt: number;
   status: "waiting" | "running" | "gameOver";
-  winner: "p1" | "p2" | null;
-  players: { p1: PlayerState; p2: PlayerState };
+  winner: string | null;
+  playerIds: string[];
+  activePlayerIds: string[];
+  players: Record<string, PlayerState>;
   solo?: {
     targetX: number;
     targetY: number;
@@ -66,9 +81,14 @@ type GameState = {
 
 type JoinResponse = {
   roomId: string;
-  playerId: "p1" | "p2";
+  playerId: string;
+  roomMode: "classic" | "swarm";
+  maxPlayers: number;
   playersJoined: number;
-  profiles: Record<"p1" | "p2", { name: string; color: string }>;
+  playersReady: number;
+  profiles: Record<string, PlayerProfile>;
+  slots: LobbySlot[];
+  canStart: boolean;
   state: GameState;
 };
 
@@ -163,6 +183,16 @@ function randomPresetColor() {
   return `#${f(0)}${f(8)}${f(4)}`;
 }
 
+function createDefaultProfiles(maxPlayers = 2): Record<string, PlayerProfile> {
+  const defaults = ["#58d27f", "#5ab5ff", "#ff8d5a", "#ffd166", "#c77dff", "#f72585", "#4cc9f0", "#90be6d", "#f28482", "#84a59d"];
+  return Object.fromEntries(
+    Array.from({ length: maxPlayers }, (_, index) => [
+      `p${index + 1}`,
+      { name: `Player ${index + 1}`, color: defaults[index % defaults.length] }
+    ])
+  );
+}
+
 function trimSnakeLength(points: Array<{ x: number; y: number }>, maxLen: number): Array<{ x: number; y: number }> {
   if (!points.length) {
     return points;
@@ -214,6 +244,8 @@ function createSoloState(selfCollisionAllowed = false): GameState {
     nextSpecialFoodAt: SOLO_SPECIAL_FOOD_INTERVAL,
     status: "running",
     winner: null,
+    playerIds: ["p1", "p2"],
+    activePlayerIds: ["p1"],
     players: {
       p1: { snake: p1Snake, direction: "right", heading: { x: 1, y: 0 }, target: { x: 1, y: 0 }, score: 0 },
       p2: { snake: [], direction: "left", heading: { x: -1, y: 0 }, target: { x: -1, y: 0 }, score: 0 }
@@ -459,7 +491,7 @@ function renderSnakeHead(
 function getEndgameSummary(
   state: GameState,
   playMode: "menu" | "solo" | "multiplayer",
-  profiles: Record<"p1" | "p2", { name: string; color: string }>
+  profiles: Record<string, PlayerProfile>
 ) {
   if (playMode === "solo") {
     return {
@@ -469,17 +501,20 @@ function getEndgameSummary(
     };
   }
   if (state.winner) {
-    const loser = state.winner === "p1" ? "p2" : "p1";
+    const standings = state.activePlayerIds
+      .map((playerId) => ({ playerId, score: state.players[playerId]?.score ?? 0 }))
+      .sort((a, b) => b.score - a.score);
+    const runnerUp = standings.find((entry) => entry.playerId !== state.winner);
     return {
       title: `${profiles[state.winner]?.name || state.winner.toUpperCase()} Wins`,
-      body: `${profiles[loser]?.name || loser.toUpperCase()} Loses`,
-      detail: `Score ${state.players.p1.score} - ${state.players.p2.score}`
+      body: runnerUp ? `Ahead of ${profiles[runnerUp.playerId]?.name || runnerUp.playerId.toUpperCase()}` : "Last snake standing.",
+      detail: standings.map((entry) => `${profiles[entry.playerId]?.name || entry.playerId}: ${entry.score}`).join(" | ")
     };
   }
   return {
     title: "Draw",
-    body: "Both players are out.",
-    detail: `Final score ${state.players.p1.score} - ${state.players.p2.score}`
+    body: "No clear winner.",
+    detail: state.activePlayerIds.map((playerId) => `${profiles[playerId]?.name || playerId}: ${state.players[playerId]?.score ?? 0}`).join(" | ")
   };
 }
 
@@ -574,18 +609,20 @@ function renderWrappedPathCopies(
 
 export default function Page() {
   const [playMode, setPlayMode] = useState<"menu" | "solo" | "multiplayer">("menu");
+  const [roomMode, setRoomMode] = useState<"classic" | "swarm">("classic");
   const [roomId, setRoomId] = useState("");
   const [pendingRoomId, setPendingRoomId] = useState("");
-  const [playerId, setPlayerId] = useState<"" | "p1" | "p2">("");
+  const [playerId, setPlayerId] = useState("");
   const [playerNameInput, setPlayerNameInput] = useState("");
   const [playerColorInput, setPlayerColorInput] = useState("#58d27f");
   const [copyInviteLabel, setCopyInviteLabel] = useState("Copy Invite");
   const [inviteUrl, setInviteUrl] = useState("#");
-  const [profiles, setProfiles] = useState<Record<"p1" | "p2", { name: string; color: string }>>({
-    p1: { name: "Player 1", color: "#58d27f" },
-    p2: { name: "Player 2", color: "#5ab5ff" }
-  });
+  const [profiles, setProfiles] = useState<Record<string, PlayerProfile>>(createDefaultProfiles());
+  const [slots, setSlots] = useState<LobbySlot[]>([]);
+  const [maxPlayers, setMaxPlayers] = useState(2);
+  const [maxPlayersInput, setMaxPlayersInput] = useState(4);
   const [playersJoined, setPlayersJoined] = useState(0);
+  const [playersReady, setPlayersReady] = useState(0);
   const [state, setState] = useState<GameState | null>(null);
   const [statusText, setStatusText] = useState("Choose a mode to start.");
   const [errorText, setErrorText] = useState("");
@@ -610,7 +647,7 @@ export default function Page() {
   const victoryAudioRef = useRef<HTMLAudioElement | null>(null);
   const beepAudioRef = useRef<HTMLAudioElement | null>(null);
   const powerUpAudioRef = useRef<HTMLAudioElement | null>(null);
-  const scoreRef = useRef<{ p1: number; p2: number } | null>(null);
+  const scoreRef = useRef<Record<string, number> | null>(null);
   const previousStatusRef = useRef<GameState["status"] | null>(null);
   const specialVisibleRef = useRef(false);
 
@@ -624,19 +661,27 @@ export default function Page() {
     }
     wsRef.current.send(JSON.stringify({ type: "fire" }));
   }, [playMode, playerId, roomId, state?.fireEnabled]);
+  const toggleReady = useCallback(() => {
+    if (playMode !== "multiplayer" || roomMode !== "swarm" || !wsRef.current) {
+      return;
+    }
+    wsRef.current.send(JSON.stringify({ type: "ready" }));
+  }, [playMode, roomMode]);
   const resetToMenu = useCallback(() => {
     wsIntentionalCloseRef.current = true;
     wsRef.current?.close();
     setPlayMode("menu");
+    setRoomMode("classic");
     setRoomId("");
     setPendingRoomId("");
     setPlayerId("");
     setInviteUrl("#");
-    setProfiles({
-      p1: { name: "Player 1", color: "#58d27f" },
-      p2: { name: "Player 2", color: "#5ab5ff" }
-    });
+    setProfiles(createDefaultProfiles());
+    setSlots([]);
+    setMaxPlayers(2);
+    setMaxPlayersInput(4);
     setPlayersJoined(0);
+    setPlayersReady(0);
     setState(null);
     setErrorText("");
     setPopupText("");
@@ -653,6 +698,9 @@ export default function Page() {
     setPendingRoomId("");
     setPlayerId("");
     setInviteUrl("#");
+    setSlots([]);
+    setPlayersJoined(0);
+    setPlayersReady(0);
     setState(createSoloState(soloSelfCollisionAllowed));
     soloNextDirectionRef.current = "right";
     lastTargetRef.current = "";
@@ -676,10 +724,14 @@ export default function Page() {
       setRoomId(joined.roomId);
       setPendingRoomId("");
       setPlayerId(joined.playerId);
+      setRoomMode(joined.roomMode);
+      setMaxPlayers(joined.maxPlayers);
       setState(joined.state);
       setPlayersJoined(joined.playersJoined);
+      setPlayersReady(joined.playersReady);
       setInviteUrl(buildInviteUrl(joined.roomId));
       setProfiles(joined.profiles);
+      setSlots(joined.slots);
       setDurationInput(joined.state.durationSeconds);
       if (joined.state.scoreLimit) {
         setScoreLimitInput(joined.state.scoreLimit);
@@ -744,20 +796,17 @@ export default function Page() {
       return;
     }
     const previous = scoreRef.current;
-    const current = {
-      p1: state.players.p1.score,
-      p2: state.players.p2.score
-    };
-    const gainedP1 = previous ? current.p1 - previous.p1 : 0;
-    const gainedP2 = previous ? current.p2 - previous.p2 : 0;
-    if (previous && (gainedP1 > 0 || gainedP2 > 0)) {
-      const sound = gainedP1 >= 10 || gainedP2 >= 10 ? powerUpAudioRef.current : biteAudioRef.current;
+    const activePlayerIds = state.activePlayerIds?.length ? state.activePlayerIds : Object.keys(state.players);
+    const current = Object.fromEntries(activePlayerIds.map((playerKey) => [playerKey, state.players[playerKey]?.score ?? 0]));
+    const gains = activePlayerIds.map((playerKey) => (previous ? current[playerKey] - (previous[playerKey] ?? 0) : 0));
+    if (previous && gains.some((gain) => gain > 0)) {
+      const sound = gains.some((gain) => gain >= 10) ? powerUpAudioRef.current : biteAudioRef.current;
       if (sound) {
         sound.currentTime = 0;
         sound.play().catch(() => {});
       }
     }
-    if (previous && (current.p1 < previous.p1 || current.p2 < previous.p2)) {
+    if (previous && activePlayerIds.some((playerKey) => current[playerKey] < (previous[playerKey] ?? 0))) {
       const sound = hitAudioRef.current;
       if (sound) {
         sound.currentTime = 0;
@@ -813,12 +862,17 @@ export default function Page() {
     wsIntentionalCloseRef.current = false;
     ws.onmessage = (event) => {
       const payload = JSON.parse(event.data) as
-          | {
+        | {
             type: "state";
             state: GameState;
             roomId: string;
+            roomMode: "classic" | "swarm";
+            maxPlayers: number;
             playersJoined: number;
-            profiles: Record<"p1" | "p2", { name: string; color: string }>;
+            playersReady: number;
+            profiles: Record<string, PlayerProfile>;
+            slots: LobbySlot[];
+            canStart: boolean;
           }
         | { type: "fired" }
         | { type: "error"; error: string };
@@ -835,9 +889,13 @@ export default function Page() {
         return;
       }
       setState(payload.state);
+      setRoomMode(payload.roomMode);
+      setMaxPlayers(payload.maxPlayers);
       setPlayersJoined(payload.playersJoined);
+      setPlayersReady(payload.playersReady);
       setInviteUrl(buildInviteUrl(payload.roomId || roomId));
       setProfiles(payload.profiles);
+      setSlots(payload.slots);
     };
     ws.onerror = () => {
       ws.close();
@@ -851,7 +909,9 @@ export default function Page() {
       setRoomId("");
       setPlayerId("");
       setState(null);
+      setSlots([]);
       setPlayersJoined(0);
+      setPlayersReady(0);
       setInviteUrl("#");
       setStatusText("Session ended. A player left the room.");
       showError("Room closed because a player disconnected.");
@@ -874,7 +934,15 @@ export default function Page() {
     if (playMode === "solo" && !roomId) {
       setStatusText(state.status === "gameOver" ? "Run complete" : `Solo score: ${state.players.p1.score}`);
     } else if (state.status === "waiting") {
-      setStatusText("Waiting for second player...");
+      if (roomMode === "swarm") {
+        setStatusText(
+          playersJoined < maxPlayers
+            ? `Lobby ${playersJoined}/${maxPlayers}. Waiting for all snakes to join.`
+            : `Ready check ${playersReady}/${maxPlayers}.`
+        );
+      } else {
+        setStatusText(playersJoined < maxPlayers ? `Waiting for player ${playersJoined + 1}...` : "Waiting for kickoff...");
+      }
     } else if (state.status === "gameOver") {
       setStatusText("Match complete");
     } else if (state.winCondition === "score") {
@@ -882,7 +950,7 @@ export default function Page() {
     } else {
       setStatusText("Running");
     }
-  }, [state, playMode, roomId]);
+  }, [state, playMode, roomId, roomMode, playersJoined, playersReady, maxPlayers]);
 
   const sendMultiplayerTarget = useCallback(
     (dx: number, dy: number) => {
@@ -981,14 +1049,20 @@ export default function Page() {
 
   const multiplayerPaths = useMemo(() => {
     if (!state || playMode === "solo") {
-      return { p1: "", p2: "" };
+      return {} as Record<string, string>;
     }
-    return {
-      p1: buildSnakePath(state.players.p1.snake, state.width, state.height, false),
-      p2: buildSnakePath(state.players.p2.snake, state.width, state.height, false)
-    };
+    return Object.fromEntries(
+      state.playerIds.map((slotPlayerId) => [
+        slotPlayerId,
+        buildSnakePath(state.players[slotPlayerId]?.snake ?? [], state.width, state.height, false)
+      ])
+    );
   }, [state, playMode]);
-  const showSecondPlayer = playMode !== "solo" && playersJoined >= 2 && Boolean(state?.players.p2.snake.length);
+  const activeSlots = useMemo(
+    () => slots.filter((slot) => slot.joined && Boolean(state?.players[slot.playerId]?.snake.length)),
+    [slots, state]
+  );
+  const currentSlot = useMemo(() => slots.find((slot) => slot.playerId === playerId) ?? null, [slots, playerId]);
 
   const inMatch = Boolean(roomId && playerId && state);
   const canShowSoloSetup = playMode === "solo" && !state && !inMatch;
@@ -1020,6 +1094,7 @@ export default function Page() {
             className="mode-card"
             onClick={() => {
               setPlayMode("multiplayer");
+              setRoomMode("classic");
               setPlayerColorInput(randomPresetColor());
               setRoomId("");
               setPlayerId("");
@@ -1033,6 +1108,27 @@ export default function Page() {
           >
             <span className="mode-title">Multiplayer</span>
             <span className="mode-text">Create a room and play with a friend.</span>
+          </button>
+          <button
+            type="button"
+            className="mode-card"
+            onClick={() => {
+              setPlayMode("multiplayer");
+              setRoomMode("swarm");
+              setPlayerColorInput(randomPresetColor());
+              setRoomId("");
+              setPlayerId("");
+              setInviteUrl("#");
+              setState(null);
+              setMaxPlayersInput(4);
+              setStatusText("Create a Swarm room.");
+              clearError();
+              setResultPopup(null);
+              clearRoomQueryParam();
+            }}
+          >
+            <span className="mode-title">Swarm</span>
+            <span className="mode-text">Configurable 2-10 player lobby with ready check.</span>
           </button>
         </section>
       ) : null}
@@ -1066,7 +1162,9 @@ export default function Page() {
       {!inMatch && playMode === "multiplayer" ? (
         <section className="setup-panel terminal-setup-panel">
           <div className="setup-head">
-            <p className="panel-label">{pendingRoomId ? `Join Room ${pendingRoomId}` : "Multiplayer Setup"}</p>
+            <p className="panel-label">
+              {pendingRoomId ? `Join Room ${pendingRoomId}` : roomMode === "swarm" ? "Swarm Setup" : "Multiplayer Setup"}
+            </p>
           </div>
 
           <div className="setup-block setup-row">
@@ -1097,6 +1195,24 @@ export default function Page() {
 
           {pendingRoomId ? null : (
             <>
+              {roomMode === "swarm" ? (
+                <div className="setup-block setup-row">
+                  <span className="setup-label">Snakes</span>
+                  <div className="input-row">
+                    <input
+                      id="max-players-input"
+                      type="number"
+                      min="2"
+                      max="10"
+                      step="1"
+                      value={maxPlayersInput}
+                      placeholder="Players"
+                      onChange={(event) => setMaxPlayersInput(Number(event.target.value))}
+                    />
+                  </div>
+                </div>
+              ) : null}
+
               <div className="setup-block setup-inline-group">
                 <div className="toggle-group">
                   <button
@@ -1184,6 +1300,8 @@ export default function Page() {
                     return;
                   }
                   const created = await api<{ roomId: string }>("/api/create-room", "POST", {
+                    mode: roomMode,
+                    maxPlayers: roomMode === "swarm" ? Number(maxPlayersInput) : 2,
                     winCondition,
                     durationSeconds: Number(durationInput),
                     scoreLimit: Number(scoreLimitInput),
@@ -1240,46 +1358,54 @@ export default function Page() {
             >
               {state ? (
                 <svg className="solo-canvas" viewBox={`0 0 ${state.width} ${state.height}`} preserveAspectRatio="none">
+                  <defs>
+                    <clipPath id="board-clip">
+                      <rect x="0" y="0" width={state.width} height={state.height} />
+                    </clipPath>
+                  </defs>
+                  <g clipPath="url(#board-clip)">
                   {playMode !== "solo" ? (
                     <>
-                      {renderWrappedPathCopies(multiplayerPaths.p1, state.width, state.height, (key, transform) => (
-                        <path key={`p1-glow-${key}`} d={multiplayerPaths.p1} transform={transform} className="multi-snake-glow p1" style={{ stroke: profiles.p1.color }} />
+                      {activeSlots.map((slot) => (
+                        <g key={slot.playerId}>
+                          {renderWrappedPathCopies(multiplayerPaths[slot.playerId] ?? "", state.width, state.height, (key, transform) => (
+                            <path
+                              key={`${slot.playerId}-glow-${key}`}
+                              d={multiplayerPaths[slot.playerId] ?? ""}
+                              transform={transform}
+                              className="multi-snake-glow"
+                              style={{ stroke: profiles[slot.playerId]?.color || slot.color }}
+                            />
+                          ))}
+                          {renderWrappedPathCopies(multiplayerPaths[slot.playerId] ?? "", state.width, state.height, (key, transform) => (
+                            <path
+                              key={`${slot.playerId}-body-${key}`}
+                              d={multiplayerPaths[slot.playerId] ?? ""}
+                              transform={transform}
+                              className="multi-snake-path"
+                              style={{ stroke: profiles[slot.playerId]?.color || slot.color }}
+                            />
+                          ))}
+                          {renderWrappedPathCopies(multiplayerPaths[slot.playerId] ?? "", state.width, state.height, (key, transform) => (
+                            <path key={`${slot.playerId}-accent-${key}`} d={multiplayerPaths[slot.playerId] ?? ""} transform={transform} className="multi-snake-accent" />
+                          ))}
+                          {renderSnakeHead(
+                            state.players[slot.playerId]?.snake[0],
+                            headingToAngle(state.players[slot.playerId]?.heading),
+                            "p1",
+                            profiles[slot.playerId]?.color || slot.color
+                          )}
+                          {state.players[slot.playerId]?.snake[0] ? (
+                            <text
+                              x={state.players[slot.playerId].snake[0].x}
+                              y={state.players[slot.playerId].snake[0].y - 3.6}
+                              className="snake-name-label"
+                            >
+                              {profiles[slot.playerId]?.name || slot.name}
+                            </text>
+                          ) : null}
+                        </g>
                       ))}
-                      {showSecondPlayer
-                        ? renderWrappedPathCopies(multiplayerPaths.p2, state.width, state.height, (key, transform) => (
-                            <path key={`p2-glow-${key}`} d={multiplayerPaths.p2} transform={transform} className="multi-snake-glow p2" style={{ stroke: profiles.p2.color }} />
-                          ))
-                        : null}
-                      {renderWrappedPathCopies(multiplayerPaths.p1, state.width, state.height, (key, transform) => (
-                        <path key={`p1-body-${key}`} d={multiplayerPaths.p1} transform={transform} className="multi-snake-path p1" style={{ stroke: profiles.p1.color }} />
-                      ))}
-                      {renderWrappedPathCopies(multiplayerPaths.p1, state.width, state.height, (key, transform) => (
-                        <path key={`p1-accent-${key}`} d={multiplayerPaths.p1} transform={transform} className="multi-snake-accent p1" />
-                      ))}
-                      {showSecondPlayer
-                        ? renderWrappedPathCopies(multiplayerPaths.p2, state.width, state.height, (key, transform) => (
-                            <path key={`p2-body-${key}`} d={multiplayerPaths.p2} transform={transform} className="multi-snake-path p2" style={{ stroke: profiles.p2.color }} />
-                          ))
-                        : null}
-                      {showSecondPlayer
-                        ? renderWrappedPathCopies(multiplayerPaths.p2, state.width, state.height, (key, transform) => (
-                            <path key={`p2-accent-${key}`} d={multiplayerPaths.p2} transform={transform} className="multi-snake-accent p2" />
-                          ))
-                        : null}
-                      {renderSnakeHead(state.players.p1.snake[0], headingToAngle(state.players.p1.heading), "p1", profiles.p1.color)}
-                      {showSecondPlayer
-                        ? renderSnakeHead(state.players.p2.snake[0], headingToAngle(state.players.p2.heading, "left"), "p2", profiles.p2.color)
-                        : null}
-                      {state.players.p1.snake[0] ? (
-                        <text x={state.players.p1.snake[0].x} y={state.players.p1.snake[0].y - 3.6} className="snake-name-label">
-                          {profiles.p1.name}
-                        </text>
-                      ) : null}
-                      {showSecondPlayer && state.players.p2.snake[0] ? (
-                        <text x={state.players.p2.snake[0].x} y={state.players.p2.snake[0].y - 3.6} className="snake-name-label">
-                          {profiles.p2.name}
-                        </text>
-                      ) : null}
                     </>
                   ) : null}
                   {playMode === "solo" ? (
@@ -1306,8 +1432,8 @@ export default function Page() {
                           <path
                             className="bullet-shape"
                             style={{
-                              fill: bullet.ownerId === "p1" ? profiles.p1.color : profiles.p2.color,
-                              stroke: bullet.ownerId === "p1" ? profiles.p1.color : profiles.p2.color
+                              fill: profiles[bullet.ownerId]?.color || "#ffffff",
+                              stroke: profiles[bullet.ownerId]?.color || "#ffffff"
                             }}
                             d="M-0.7 -0.16 L0.72 0 L-0.7 0.16 L-0.24 0 Z"
                           />
@@ -1320,7 +1446,7 @@ export default function Page() {
                           <circle
                             className="hit-burst-ring"
                             r="0.8"
-                            style={{ stroke: impact.ownerId === "p1" ? profiles.p1.color : profiles.p2.color }}
+                            style={{ stroke: profiles[impact.ownerId]?.color || "#ffffff" }}
                           >
                             <animate attributeName="r" from="0.8" to="3.2" dur="0.26s" fill="freeze" />
                             <animate attributeName="opacity" from="0.95" to="0" dur="0.26s" fill="freeze" />
@@ -1329,8 +1455,8 @@ export default function Page() {
                             className="hit-burst-core"
                             r="0.5"
                             style={{
-                              fill: impact.ownerId === "p1" ? profiles.p1.color : profiles.p2.color,
-                              color: impact.ownerId === "p1" ? profiles.p1.color : profiles.p2.color
+                              fill: profiles[impact.ownerId]?.color || "#ffffff",
+                              color: profiles[impact.ownerId]?.color || "#ffffff"
                             }}
                           >
                             <animate attributeName="r" from="0.5" to="0.08" dur="0.26s" fill="freeze" />
@@ -1339,6 +1465,7 @@ export default function Page() {
                         </g>
                       ))
                     : null}
+                  </g>
                 </svg>
               ) : null}
               <div
@@ -1474,23 +1601,16 @@ export default function Page() {
                 ) : (
                   <>
                     <div className="stat-chip">
-                      <span className="stat-label">P1</span>
-                      <strong>{state?.players?.p1?.score ?? 0}</strong>
+                      <span className="stat-label">You</span>
+                      <strong>{playerId ? profiles[playerId]?.name || playerId.toUpperCase() : "-"}</strong>
                     </div>
-                    {showSecondPlayer ? (
-                      <div className="stat-chip">
-                        <span className="stat-label">P2</span>
-                        <strong>{state?.players?.p2?.score ?? 0}</strong>
-                      </div>
-                    ) : (
-                      <div className="stat-chip">
-                        <span className="stat-label">Room</span>
-                        <strong>Waiting</strong>
-                      </div>
-                    )}
                     <div className="stat-chip">
-                      <span className="stat-label">Role</span>
-                      <strong>{playerId ? playerId.toUpperCase() : "-"}</strong>
+                      <span className="stat-label">Lobby</span>
+                      <strong>{playersJoined}/{maxPlayers}</strong>
+                    </div>
+                    <div className="stat-chip">
+                      <span className="stat-label">{roomMode === "swarm" ? "Ready" : "Mode"}</span>
+                      <strong>{roomMode === "swarm" ? `${playersReady}/${maxPlayers}` : "Classic"}</strong>
                     </div>
                     <div className="stat-chip">
                       <span className="stat-label">{state?.winCondition === "time" ? "Time" : "Target"}</span>
@@ -1508,6 +1628,7 @@ export default function Page() {
                 <span className="rule-chip">
                   {state?.winCondition === "time" ? `Time Limit ${state?.durationSeconds}s` : `Score Limit ${state?.scoreLimit ?? "-"}`}
                 </span>
+                <span className="rule-chip">{roomMode === "swarm" ? "Swarm Lobby" : "Classic Room"}</span>
                 <span className="rule-chip">Self Collision {state?.selfCollisionAllowed ? "On" : "Off"}</span>
                 {playMode === "solo" ? null : (
                   <>
@@ -1521,6 +1642,31 @@ export default function Page() {
                 <div className="invite-inline">
                   <span className="stat-label">Invite</span>
                   <a href={inviteUrl}>{inviteUrl === "#" ? "-" : inviteUrl}</a>
+                </div>
+              )}
+
+              {playMode === "solo" ? null : (
+                <div className="setup-actions">
+                  {roomMode === "swarm" && state?.status === "waiting" ? (
+                    <button type="button" className={currentSlot?.ready ? "active-option" : ""} onClick={toggleReady}>
+                      {currentSlot?.ready ? "Unready" : "Ready Up"}
+                    </button>
+                  ) : null}
+                </div>
+              )}
+
+              {playMode === "solo" ? null : (
+                <div className="invite-inline">
+                  <span className="stat-label">Players</span>
+                  <div>
+                    {slots.map((slot) => (
+                      <div key={slot.playerId}>
+                        {slot.joined ? `${slot.name} (${slot.playerId.toUpperCase()})` : `Open ${slot.playerId.toUpperCase()}`}
+                        {slot.joined ? ` • ${state?.players[slot.playerId]?.score ?? 0} pts` : ""}
+                        {roomMode === "swarm" && slot.joined ? ` • ${slot.ready ? "Ready" : "Waiting"}` : ""}
+                      </div>
+                    ))}
+                  </div>
                 </div>
               )}
 

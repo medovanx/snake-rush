@@ -1185,6 +1185,7 @@ button:active {
   width: 100%;
   height: 100%;
   display: block;
+  overflow: hidden;
   background:
     radial-gradient(circle at 20% 10%, rgba(70, 178, 255, 0.1), transparent 40%),
     radial-gradient(circle at 85% 90%, rgba(83, 212, 132, 0.08), transparent 40%);
